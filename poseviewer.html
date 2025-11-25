@@ -2,24 +2,31 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>QR Pose Viewer (mobile-friendly)</title>
+<title>QR Pose Viewer with Recording</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
   body { font-family: sans-serif; background: #111; color: #fff; text-align: center; margin:0; padding:20px; }
   video, canvas { width: 90vw; max-width: 600px; border-radius:8px; background:#000; }
   #info { margin-top: 12px; white-space: pre; font-size: 14px; }
-  #startBtn { margin: 12px; padding: 10px 16px; font-size:16px; border-radius:8px; }
+  #startBtn, #startRecBtn, #stopRecBtn { margin: 12px; padding: 10px 16px; font-size:16px; border-radius:8px; }
+  #plotCanvas { margin-top:12px; background:#222; border-radius:8px; }
 </style>
+<!-- Chart.js -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
 
-<h2>QR Pose Viewer</h2>
+<h2>QR Pose Viewer with Recording</h2>
 
-<button id="startBtn">Start Camera</button>
+<button id="startBtn">Start Camera</button><br>
+<button id="startRecBtn">Start Recording</button>
+<button id="stopRecBtn">Stop Recording</button>
 <br>
+
 <video id="video" playsinline autoplay muted></video>
 <canvas id="canvas"></canvas>
 <div id="info">Initializing...</div>
+<canvas id="plotCanvas" style="width:90vw; max-width:600px; height:300px;"></canvas>
 
 <script>
 let video = document.getElementById('video');
@@ -31,8 +38,12 @@ let initialized = false;
 let cameraMatrix, distCoeffs;
 let qrDetector;
 
-// QR code size in meters
-const qrSize = 0.10; // 10 cm
+const qrSize = 0.10; // 10 cm QR code
+
+// Recording arrays
+let rvecHistory = [];
+let tvecHistory = [];
+let recording = false;
 
 async function initCamera() {
   try {
@@ -42,9 +53,7 @@ async function initCamera() {
     });
     video.srcObject = stream;
     return new Promise((resolve, reject) => {
-      video.onloadedmetadata = () => {
-        video.play().then(()=>resolve()).catch(reject);
-      };
+      video.onloadedmetadata = () => video.play().then(()=>resolve()).catch(reject);
       setTimeout(() => {
         if (video.videoWidth > 0) resolve();
         else reject(new Error("Timed out waiting for video metadata"));
@@ -67,19 +76,12 @@ async function startApplication() {
     info.textContent = "Loading camera...";
     try {
         await initCamera();
-
-        // QR code detector
         qrDetector = new cv.QRCodeDetector();
 
-        // Camera matrix estimate
         let w = video.videoWidth || 640;
         let h = video.videoHeight || 480;
         let f = Math.max(w, h);
-        cameraMatrix = cv.matFromArray(3,3,cv.CV_64F, [
-            f, 0, w/2,
-            0, f, h/2,
-            0, 0, 1
-        ]);
+        cameraMatrix = cv.matFromArray(3,3,cv.CV_64F, [f,0,w/2, 0,f,h/2, 0,0,1]);
         distCoeffs = cv.Mat.zeros(4,1,cv.CV_64F);
 
         initialized = true;
@@ -91,6 +93,21 @@ async function startApplication() {
     }
 }
 
+// Start / stop recording buttons
+document.getElementById('startRecBtn').addEventListener('click', () => {
+    rvecHistory = [];
+    tvecHistory = [];
+    recording = true;
+    info.textContent = "Recording poses...";
+});
+
+document.getElementById('stopRecBtn').addEventListener('click', () => {
+    recording = false;
+    info.textContent = "Recording stopped. Plotting...";
+    plotPoses();
+});
+
+// Tick function
 function tick() {
     if (!initialized || !cv) {
         requestAnimationFrame(tick);
@@ -111,7 +128,7 @@ function tick() {
     if (qrDetector.detect(gray, points)) {
         qrDetector.decode(gray, points, straight_qrcode);
 
-        // Draw QR code boundary
+        // Draw QR boundary
         for (let i = 0; i < 4; i++) {
             let pt1 = new cv.Point(points.data32F[i*2], points.data32F[i*2+1]);
             let pt2 = new cv.Point(points.data32F[((i+1)%4)*2], points.data32F[((i+1)%4)*2+1]);
@@ -120,21 +137,25 @@ function tick() {
 
         // Solve PnP
         let objPoints = cv.matFromArray(4,1,cv.CV_32FC3, [
-            0, 0, 0,
-            qrSize, 0, 0,
-            qrSize, qrSize, 0,
-            0, qrSize, 0
+            0,0,0,
+            qrSize,0,0,
+            qrSize,qrSize,0,
+            0,qrSize,0
         ]);
         let imagePoints = cv.matFromArray(4,1,cv.CV_32FC2, points.data32F);
 
         let rvec = new cv.Mat();
         let tvec = new cv.Mat();
-
         let success = cv.solvePnP(objPoints, imagePoints, cameraMatrix, distCoeffs, rvec, tvec, false, cv.SOLVEPNP_ITERATIVE);
 
         if (success) {
             info.textContent = `rvec: [${Array.from(rvec.data64F).map(x=>x.toFixed(3)).join(", ")}]\n` +
                                `tvec: [${Array.from(tvec.data64F).map(x=>x.toFixed(3)).join(", ")}]`;
+
+            if (recording) {
+                rvecHistory.push(Array.from(rvec.data64F));
+                tvecHistory.push(Array.from(tvec.data64F));
+            }
         }
 
         // Draw axes
@@ -146,11 +167,10 @@ function tick() {
         ]);
         let imgpts = new cv.Mat();
         cv.projectPoints(axis, rvec, tvec, cameraMatrix, distCoeffs, imgpts);
-
         let corner = new cv.Point(points.data32F[0], points.data32F[1]);
-        cv.line(src, corner, new cv.Point(imgpts.data32F[0], imgpts.data32F[1]), [0,0,255,255], 3); // X red
-        cv.line(src, corner, new cv.Point(imgpts.data32F[3], imgpts.data32F[4]), [0,255,0,255], 3); // Y green
-        cv.line(src, corner, new cv.Point(imgpts.data32F[6], imgpts.data32F[7]), [255,0,0,255], 3); // Z blue
+        cv.line(src, corner, new cv.Point(imgpts.data32F[0], imgpts.data32F[1]), [0,0,255,255], 3);
+        cv.line(src, corner, new cv.Point(imgpts.data32F[3], imgpts.data32F[4]), [0,255,0,255], 3);
+        cv.line(src, corner, new cv.Point(imgpts.data32F[6], imgpts.data32F[7]), [255,0,0,255], 3);
 
         objPoints.delete(); imagePoints.delete(); rvec.delete(); tvec.delete(); axis.delete(); imgpts.delete();
     } else {
@@ -163,18 +183,42 @@ function tick() {
     requestAnimationFrame(tick);
 }
 
+// Plot poses with Chart.js
+function plotPoses() {
+    const labels = rvecHistory.map((_, i) => i);
+
+    const data = {
+        labels: labels,
+        datasets: [
+            { label: 'rvec X', data: rvecHistory.map(v=>v[0]), borderColor: 'red', fill:false },
+            { label: 'rvec Y', data: rvecHistory.map(v=>v[1]), borderColor: 'green', fill:false },
+            { label: 'rvec Z', data: rvecHistory.map(v=>v[2]), borderColor: 'blue', fill:false },
+            { label: 'tvec X', data: tvecHistory.map(v=>v[0]), borderColor: 'orange', fill:false },
+            { label: 'tvec Y', data: tvecHistory.map(v=>v[1]), borderColor: 'purple', fill:false },
+            { label: 'tvec Z', data: tvecHistory.map(v=>v[2]), borderColor: 'cyan', fill:false },
+        ]
+    };
+
+    new Chart(document.getElementById('plotCanvas'), {
+        type: 'line',
+        data: data,
+        options: { responsive:true, plugins:{ legend:{ position:'top' } } }
+    });
+}
+
 document.addEventListener('DOMContentLoaded', function() {
     info.textContent = "Loading OpenCV...";
     document.getElementById('startBtn').addEventListener('click', async () => {
         document.getElementById('startBtn').style.display = 'none';
         if (typeof cv !== 'undefined' && cv && cv['onRuntimeInitialized']) {
-            // will call startApplication
+            // runtime will call startApplication
         } else {
             onOpenCVReady();
         }
     });
 });
 
+// Load OpenCV.js
 </script>
 <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCVReady()"></script>
 
