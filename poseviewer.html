@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>ArUco Pose Viewer (mobile-friendly)</title>
+<title>QR Pose Viewer (mobile-friendly)</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
   body { font-family: sans-serif; background: #111; color: #fff; text-align: center; margin:0; padding:20px; }
@@ -13,9 +13,8 @@
 </head>
 <body>
 
-<h2>ArUco Pose Viewer</h2>
+<h2>QR Pose Viewer</h2>
 
-<!-- Start button helps on iOS where a user gesture is sometimes required -->
 <button id="startBtn">Start Camera</button>
 <br>
 <video id="video" playsinline autoplay muted></video>
@@ -28,11 +27,13 @@ let canvas = document.getElementById('canvas');
 let ctx = canvas.getContext('2d');
 let info = document.getElementById('info');
 
-let detector;
 let initialized = false;
 let cameraMatrix, distCoeffs;
+let qrDetector;
 
-// Use ideal environment camera, but allow fallback
+// QR code size in meters
+const qrSize = 0.10; // 10 cm
+
 async function initCamera() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
@@ -40,13 +41,10 @@ async function initCamera() {
       audio: false
     });
     video.srcObject = stream;
-    // Return a promise that resolves when video metadata is loaded
     return new Promise((resolve, reject) => {
       video.onloadedmetadata = () => {
-        // In some browsers you need to call play() explicitly
         video.play().then(()=>resolve()).catch(reject);
       };
-      // fallback timeout
       setTimeout(() => {
         if (video.videoWidth > 0) resolve();
         else reject(new Error("Timed out waiting for video metadata"));
@@ -70,23 +68,22 @@ async function startApplication() {
     try {
         await initCamera();
 
-        // create aruco detector (uses predefined dictionary)
-        detector = new cv.aruco.Dictionary(cv.aruco.getPredefinedDictionary(cv.aruco.DICT_4X4_50));
+        // QR code detector
+        qrDetector = new cv.QRCodeDetector();
 
-        // Now video.videoWidth & video.videoHeight should be available
+        // Camera matrix estimate
         let w = video.videoWidth || 640;
         let h = video.videoHeight || 480;
-        // A simple focal length estimate — use width as baseline
         let f = Math.max(w, h);
         cameraMatrix = cv.matFromArray(3,3,cv.CV_64F, [
             f, 0, w/2,
             0, f, h/2,
             0, 0, 1
         ]);
-        distCoeffs = cv.Mat.zeros(5,1,cv.CV_64F);
+        distCoeffs = cv.Mat.zeros(4,1,cv.CV_64F);
 
-        info.textContent = "Point your camera at the ArUco marker.";
         initialized = true;
+        info.textContent = "Point your camera at a QR code.";
         tick();
     } catch (error) {
         console.error(error);
@@ -100,7 +97,6 @@ function tick() {
         return;
     }
 
-    // adjust canvas size to video
     canvas.width = video.videoWidth || canvas.width;
     canvas.height = video.videoHeight || canvas.height;
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
@@ -109,72 +105,76 @@ function tick() {
     let gray = new cv.Mat();
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
 
-    let corners = new cv.MatVector();
-    let ids = new cv.Mat();
+    let points = new cv.Mat();
+    let straight_qrcode = new cv.Mat();
 
-    // detect markers
-    cv.aruco.detectMarkers(gray, detector, corners, ids);
+    if (qrDetector.detect(gray, points)) {
+        qrDetector.decode(gray, points, straight_qrcode);
 
-    if (!ids.empty()) {
-        cv.aruco.drawDetectedMarkers(src, corners, ids);
+        // Draw QR code boundary
+        for (let i = 0; i < 4; i++) {
+            let pt1 = new cv.Point(points.data32F[i*2], points.data32F[i*2+1]);
+            let pt2 = new cv.Point(points.data32F[((i+1)%4)*2], points.data32F[((i+1)%4)*2+1]);
+            cv.line(src, pt1, pt2, [0,255,0,255], 2);
+        }
+
+        // Solve PnP
+        let objPoints = cv.matFromArray(4,1,cv.CV_32FC3, [
+            0, 0, 0,
+            qrSize, 0, 0,
+            qrSize, qrSize, 0,
+            0, qrSize, 0
+        ]);
+        let imagePoints = cv.matFromArray(4,1,cv.CV_32FC2, points.data32F);
 
         let rvec = new cv.Mat();
         let tvec = new cv.Mat();
 
-        cv.aruco.estimatePoseSingleMarkers(
-            corners,
-            0.10, // marker length meters (adjust as needed)
-            cameraMatrix,
-            distCoeffs,
-            rvec, tvec
-        );
+        let success = cv.solvePnP(objPoints, imagePoints, cameraMatrix, distCoeffs, rvec, tvec, false, cv.SOLVEPNP_ITERATIVE);
 
-        for (let i = 0; i < ids.rows; i++) {
-            // draw axis for each marker
-            let rvecRow = new cv.Mat();
-            let tvecRow = new cv.Mat();
-            rvec.row(i).copyTo(rvecRow);
-            tvec.row(i).copyTo(tvecRow);
-            cv.aruco.drawAxis(src, cameraMatrix, distCoeffs, rvecRow, tvecRow, 0.05);
-            rvecRow.delete(); tvecRow.delete();
+        if (success) {
+            info.textContent = `rvec: [${Array.from(rvec.data64F).map(x=>x.toFixed(3)).join(", ")}]\n` +
+                               `tvec: [${Array.from(tvec.data64F).map(x=>x.toFixed(3)).join(", ")}]`;
         }
 
-        // show first marker pose
-        if (rvec.data64F && rvec.data64F.length >= 3 && tvec.data64F && tvec.data64F.length >= 3) {
-            let r = [rvec.data64F[0].toFixed(3), rvec.data64F[1].toFixed(3), rvec.data64F[2].toFixed(3)];
-            let t = [tvec.data64F[0].toFixed(3), tvec.data64F[1].toFixed(3), tvec.data64F[2].toFixed(3)];
-            info.textContent = "Marker ID: " + ids.data32S[0] + "\n" +
-                "rvec: [" + r.join(", ") + "]\n" +
-                "tvec: [" + t.join(", ") + "]";
-        }
+        // Draw axes
+        let axisLength = 0.05;
+        let axis = cv.matFromArray(3,3,cv.CV_32FC3, [
+            axisLength,0,0,
+            0,axisLength,0,
+            0,0,axisLength
+        ]);
+        let imgpts = new cv.Mat();
+        cv.projectPoints(axis, rvec, tvec, cameraMatrix, distCoeffs, imgpts);
 
-        rvec.delete(); tvec.delete();
+        let corner = new cv.Point(points.data32F[0], points.data32F[1]);
+        cv.line(src, corner, new cv.Point(imgpts.data32F[0], imgpts.data32F[1]), [0,0,255,255], 3); // X red
+        cv.line(src, corner, new cv.Point(imgpts.data32F[3], imgpts.data32F[4]), [0,255,0,255], 3); // Y green
+        cv.line(src, corner, new cv.Point(imgpts.data32F[6], imgpts.data32F[7]), [255,0,0,255], 3); // Z blue
+
+        objPoints.delete(); imagePoints.delete(); rvec.delete(); tvec.delete(); axis.delete(); imgpts.delete();
     } else {
-        info.textContent = "No markers detected";
+        info.textContent = "No QR code detected";
     }
 
     cv.imshow(canvas, src);
-    src.delete(); gray.delete(); corners.delete(); ids.delete();
+    src.delete(); gray.delete(); points.delete(); straight_qrcode.delete();
 
     requestAnimationFrame(tick);
 }
 
 document.addEventListener('DOMContentLoaded', function() {
     info.textContent = "Loading OpenCV...";
-    // Start button for iOS / explicit permission
     document.getElementById('startBtn').addEventListener('click', async () => {
         document.getElementById('startBtn').style.display = 'none';
-        // If OpenCV already loaded runtime may already call startApplication, otherwise onOpenCVReady will trigger it.
         if (typeof cv !== 'undefined' && cv && cv['onRuntimeInitialized']) {
-            // if OpenCV ready, startApplication will be called by onRuntimeInitialized
+            // will call startApplication
         } else {
-            // fallback:
             onOpenCVReady();
         }
     });
 });
 
-// Load OpenCV; page will call onOpenCVReady when script is loaded
 </script>
 <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCVReady()"></script>
 
