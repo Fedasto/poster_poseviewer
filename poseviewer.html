@@ -26,7 +26,7 @@
 <video id="video" playsinline autoplay muted></video>
 <canvas id="canvas"></canvas>
 <div id="info">Initializing...</div>
-<canvas id="plotCanvas" width="600" height="300"></canvas>
+<canvas id="plotCanvas" style="width:90vw; max-width:600px; height:300px;"></canvas>
 
 <script>
 let video = document.getElementById('video');
@@ -98,12 +98,12 @@ document.getElementById('startRecBtn').addEventListener('click', () => {
     rvecHistory = [];
     tvecHistory = [];
     recording = true;
-    info.textContent = "Recording poses... Frames recorded: 0";
+    info.textContent = "Recording poses...";
 });
 
 document.getElementById('stopRecBtn').addEventListener('click', () => {
     recording = false;
-    info.textContent = `Recording stopped. Frames recorded: ${rvecHistory.length}`;
+    info.textContent = "Recording stopped. Plotting...";
     plotPoses();
 });
 
@@ -150,8 +150,7 @@ function tick() {
 
         if (success) {
             info.textContent = `rvec: [${Array.from(rvec.data64F).map(x=>x.toFixed(3)).join(", ")}]\n` +
-                               `tvec: [${Array.from(tvec.data64F).map(x=>x.toFixed(3)).join(", ")}]` +
-                               (recording ? `\nFrames recorded: ${rvecHistory.length + 1}` : '');
+                               `tvec: [${Array.from(tvec.data64F).map(x=>x.toFixed(3)).join(", ")}]`;
 
             if (recording) {
                 rvecHistory.push(Array.from(rvec.data64F));
@@ -175,9 +174,7 @@ function tick() {
 
         objPoints.delete(); imagePoints.delete(); rvec.delete(); tvec.delete(); axis.delete(); imgpts.delete();
     } else {
-        info.textContent = recording 
-            ? `Recording poses... Frames recorded: ${rvecHistory.length}` 
-            : "No QR code detected";
+        info.textContent = "No QR code detected";
     }
 
     cv.imshow(canvas, src);
@@ -188,11 +185,6 @@ function tick() {
 
 // Plot poses with Chart.js
 function plotPoses() {
-    if (rvecHistory.length === 0 || tvecHistory.length === 0) {
-        info.textContent = "No data recorded!";
-        return;
-    }
-
     const labels = rvecHistory.map((_, i) => i);
 
     const data = {
