@@ -9,14 +9,29 @@
   video, canvas { width: 90vw; max-width: 600px; border-radius:8px; background:#000; }
   #info { margin-top: 12px; white-space: pre; font-size: 14px; }
   #startBtn, #startRecBtn, #stopRecBtn { margin: 12px; padding: 10px 16px; font-size:16px; border-radius:8px; }
+
+  #instructions {
+    background:#222; padding:15px; border-radius:10px; margin-bottom:15px;
+    text-align:left; max-width:600px; margin-left:auto; margin-right:auto;
+    font-size:14px; line-height:1.4;
+  }
+
   #plotCanvas { margin-top:12px; background:#222; border-radius:8px; }
 </style>
-<!-- Chart.js -->
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
 
 <h2>QR Pose Viewer with Recording</h2>
+
+<div id="instructions">
+<b>Instructions:</b><br>
+1. Press <b>Start Camera</b>.<br>
+2. Point your device at a 10 cm QR code.<br>
+3. Press <b>Start Recording</b> to collect pose samples.<br>
+4. Press <b>Stop Recording</b> to downsample & plot (~10 frames).<br>
+5. rvec is shown in <b>degrees</b>, tvec in <b>centimeters</b>.
+</div>
 
 <button id="startBtn">Start Camera</button><br>
 <button id="startRecBtn">Start Recording</button>
@@ -38,12 +53,22 @@ let initialized = false;
 let cameraMatrix, distCoeffs;
 let qrDetector;
 
-const qrSize = 0.10; // 10 cm QR code
-
-// Recording arrays
+// Recording
 let rvecHistory = [];
 let tvecHistory = [];
 let recording = false;
+
+const qrSize = 0.10; // 10 cm QR code
+
+function downsample(arr, targetCount=10) {
+    if (arr.length <= targetCount) return arr;
+    let step = arr.length / targetCount;
+    let out = [];
+    for (let i = 0; i < targetCount; i++) {
+        out.push(arr[Math.floor(i * step)]);
+    }
+    return out;
+}
 
 async function initCamera() {
   try {
@@ -65,9 +90,7 @@ async function initCamera() {
 }
 
 function onOpenCVReady() {
-    console.log("OpenCV.js loaded");
     cv['onRuntimeInitialized'] = async () => {
-        console.log("OpenCV runtime initialized");
         await startApplication();
     };
 }
@@ -81,18 +104,11 @@ async function startApplication() {
         let w = video.videoWidth  || 1080;
         let h = video.videoHeight || 1920;
 
-        // --- Samsung S23+ main camera HFOV = 85° ---
-        const HFOV_DEG = 85.0;
-        const HFOV = HFOV_DEG * Math.PI / 180;
-
-        // Focal lengths in pixels (derived from FOV)
+        const HFOV = 85 * Math.PI / 180;
         const fx = (w / 2) / Math.tan(HFOV / 2);
         const VFOV = 2 * Math.atan((h / w) * Math.tan(HFOV / 2));
         const fy = (h / 2) / Math.tan(VFOV / 2);
-
-        // Principal point (center)
-        const cx = w / 2;
-        const cy = h / 2;
+        const cx = w / 2, cy = h / 2;
 
         cameraMatrix = cv.matFromArray(3, 3, cv.CV_64F, [
             fx, 0,  cx,
@@ -100,22 +116,16 @@ async function startApplication() {
             0,  0,   1
         ]);
 
-        // Distortion coefficients — zero is safest
         distCoeffs = cv.Mat.zeros(5, 1, cv.CV_64F);
 
         initialized = true;
         info.textContent = "Point your camera at a QR code.";
         tick();
-
     } catch (error) {
-        console.error(error);
-        info.textContent = "Camera error: " +
-            (error && error.message ? error.message : error);
+        info.textContent = "Camera error: " + error;
     }
 }
 
-
-// Start / stop recording buttons
 document.getElementById('startRecBtn').addEventListener('click', () => {
     rvecHistory = [];
     tvecHistory = [];
@@ -129,15 +139,14 @@ document.getElementById('stopRecBtn').addEventListener('click', () => {
     plotPoses();
 });
 
-// Tick function
 function tick() {
     if (!initialized || !cv) {
         requestAnimationFrame(tick);
         return;
     }
 
-    canvas.width = video.videoWidth || canvas.width;
-    canvas.height = video.videoHeight || canvas.height;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
     let src = cv.imread(canvas);
@@ -150,14 +159,7 @@ function tick() {
     if (qrDetector.detect(gray, points)) {
         qrDetector.decode(gray, points, straight_qrcode);
 
-        // Draw QR boundary
-        for (let i = 0; i < 4; i++) {
-            let pt1 = new cv.Point(points.data32F[i*2], points.data32F[i*2+1]);
-            let pt2 = new cv.Point(points.data32F[((i+1)%4)*2], points.data32F[((i+1)%4)*2+1]);
-            cv.line(src, pt1, pt2, [0,255,0,255], 2);
-        }
-
-        // Solve PnP
+        // Object points
         let objPoints = cv.matFromArray(4,1,cv.CV_32FC3, [
             0,0,0,
             qrSize,0,0,
@@ -168,33 +170,24 @@ function tick() {
 
         let rvec = new cv.Mat();
         let tvec = new cv.Mat();
-        let success = cv.solvePnP(objPoints, imagePoints, cameraMatrix, distCoeffs, rvec, tvec, false, cv.SOLVEPNP_ITERATIVE);
+        let ok = cv.solvePnP(objPoints, imagePoints, cameraMatrix, distCoeffs, rvec, tvec);
 
-        if (success) {
-            info.textContent = `rvec: [${Array.from(rvec.data64F).map(x=>x.toFixed(3)).join(", ")}]\n` +
-                               `tvec: [${Array.from(tvec.data64F).map(x=>x.toFixed(3)).join(", ")}]`;
+        if (ok) {
+            // Convert
+            let r = Array.from(rvec.data64F).map(v => v * 180 / Math.PI);
+            let t = Array.from(tvec.data64F).map(v => v * 100);
+
+            info.textContent =
+                `rvec (deg): [${r.map(v=>v.toFixed(2)).join(", ")}]\n` +
+                `tvec (cm):  [${t.map(v=>v.toFixed(2)).join(", ")}]`;
 
             if (recording) {
-                rvecHistory.push(Array.from(rvec.data64F));
-                tvecHistory.push(Array.from(tvec.data64F));
+                rvecHistory.push(r);
+                tvecHistory.push(t);
             }
         }
 
-        // Draw axes
-        let axisLength = 0.05;
-        let axis = cv.matFromArray(3,3,cv.CV_32FC3, [
-            axisLength,0,0,
-            0,axisLength,0,
-            0,0,axisLength
-        ]);
-        let imgpts = new cv.Mat();
-        cv.projectPoints(axis, rvec, tvec, cameraMatrix, distCoeffs, imgpts);
-        let corner = new cv.Point(points.data32F[0], points.data32F[1]);
-        cv.line(src, corner, new cv.Point(imgpts.data32F[0], imgpts.data32F[1]), [0,0,255,255], 3);
-        cv.line(src, corner, new cv.Point(imgpts.data32F[3], imgpts.data32F[4]), [0,255,0,255], 3);
-        cv.line(src, corner, new cv.Point(imgpts.data32F[6], imgpts.data32F[7]), [255,0,0,255], 3);
-
-        objPoints.delete(); imagePoints.delete(); rvec.delete(); tvec.delete(); axis.delete(); imgpts.delete();
+        objPoints.delete(); imagePoints.delete(); rvec.delete(); tvec.delete();
     } else {
         info.textContent = "No QR code detected";
     }
@@ -205,43 +198,47 @@ function tick() {
     requestAnimationFrame(tick);
 }
 
-// Plot poses with Chart.js
 function plotPoses() {
-    const labels = rvecHistory.map((_, i) => i);
+    // Downsample to ~10 frames
+    let r10 = downsample(rvecHistory, 10);
+    let t10 = downsample(tvecHistory, 10);
 
-    const data = {
-        labels: labels,
-        datasets: [
-            { label: 'rvec X', data: rvecHistory.map(v=>v[0]), borderColor: 'red', fill:false },
-            { label: 'rvec Y', data: rvecHistory.map(v=>v[1]), borderColor: 'green', fill:false },
-            { label: 'rvec Z', data: rvecHistory.map(v=>v[2]), borderColor: 'blue', fill:false },
-            { label: 'tvec X', data: tvecHistory.map(v=>v[0]), borderColor: 'orange', fill:false },
-            { label: 'tvec Y', data: tvecHistory.map(v=>v[1]), borderColor: 'purple', fill:false },
-            { label: 'tvec Z', data: tvecHistory.map(v=>v[2]), borderColor: 'cyan', fill:false },
-        ]
-    };
+    let labels = r10.map((_,i)=>i);
 
     new Chart(document.getElementById('plotCanvas'), {
         type: 'line',
-        data: data,
-        options: { responsive:true, plugins:{ legend:{ position:'top' } } }
+        data: {
+            labels: labels,
+            datasets: [
+                { label:"rvec X (deg)", data:r10.map(v=>v[0]), borderColor:"red" },
+                { label:"rvec Y (deg)", data:r10.map(v=>v[1]), borderColor:"green" },
+                { label:"rvec Z (deg)", data:r10.map(v=>v[2]), borderColor:"blue" },
+                { label:"tvec X (cm)",  data:t10.map(v=>v[0]), borderColor:"orange" },
+                { label:"tvec Y (cm)",  data:t10.map(v=>v[1]), borderColor:"purple" },
+                { label:"tvec Z (cm)",  data:t10.map(v=>v[2]), borderColor:"cyan" }
+            ]
+        },
+        options:{
+            responsive:true,
+            animation:false,
+            plugins:{ legend:{ position:'top' } }
+        }
     });
 }
 
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', () => {
     info.textContent = "Loading OpenCV...";
-    document.getElementById('startBtn').addEventListener('click', async () => {
+    document.getElementById('startBtn').addEventListener('click', () => {
         document.getElementById('startBtn').style.display = 'none';
         if (typeof cv !== 'undefined' && cv && cv['onRuntimeInitialized']) {
-            // runtime will call startApplication
+            // runtime will start automatically
         } else {
             onOpenCVReady();
         }
     });
 });
-
-// Load OpenCV.js
 </script>
+
 <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCVReady()"></script>
 
 </body>
