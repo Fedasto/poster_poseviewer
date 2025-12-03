@@ -78,8 +78,8 @@ async function startApplication() {
         await initCamera();
         qrDetector = new cv.QRCodeDetector();
 
-        let w = video.videoWidth  || 640;
-        let h = video.videoHeight || 480;
+        let w = video.videoWidth  || 1080;
+        let h = video.videoHeight || 1920;
 
         // --- Samsung S23+ main camera HFOV = 85° ---
         const HFOV_DEG = 85.0;
